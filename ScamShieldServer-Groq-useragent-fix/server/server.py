@@ -2845,7 +2845,7 @@ def analyze_video():
             frame = base64.b64decode(encoded, validate=True)
         except Exception:
             raise ApiError("Không đọc được dữ liệu khung hình")
-        if len(frame) < 4 or len(frame) > 800 * 1024 or not frame.startswith(b"\\xff\\xd8\\xff"):
+        if len(frame) < 4 or len(frame) > 800 * 1024 or not frame.startswith(b"\xff\xd8\xff"):
             raise ApiError("Khung hình JPEG không hợp lệ")
         total_bytes += len(frame)
         if total_bytes > 5 * 1024 * 1024:
