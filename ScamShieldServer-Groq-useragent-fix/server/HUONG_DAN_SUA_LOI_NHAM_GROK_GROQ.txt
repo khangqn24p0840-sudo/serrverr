@@ -1,0 +1,12 @@
+LUU Y QUAN TRONG
+
+Ban ScamShieldServer-Grok-primary truoc do cau hinh xAI/Grok, KHONG phai Groq. Khong tiep tuc dung ban do neu ban muon Groq.
+
+Ban nay da duoc chuyen dung sang Groq:
+- AI_PROVIDER=groq
+- GROQ_API_KEY (tao tai Groq Console > API Keys)
+- endpoint https://api.groq.com/openai/v1/chat/completions
+- model van ban openai/gpt-oss-20b
+- model nhan anh qwen/qwen3.8-27b
+
+Giu nguyen ADMIN_KEY, SECRET_KEY va thu muc data cu. Khong gui .env/API key cho nguoi khac.

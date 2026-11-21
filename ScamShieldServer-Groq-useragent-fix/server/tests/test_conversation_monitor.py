@@ -1,0 +1,202 @@
+import json
+import os
+import tempfile
+import unittest
+import uuid
+from pathlib import Path
+from unittest.mock import patch
+
+_TEST_DATA = tempfile.TemporaryDirectory(prefix="scamshield-monitor-test-")
+os.environ.setdefault("DATA_DIR", _TEST_DATA.name)
+os.environ.setdefault("DB_PATH", str(Path(_TEST_DATA.name) / "monitor-test.db"))
+os.environ.setdefault("SECRET_KEY", "conversation-monitor-test-secret")
+os.environ.setdefault("ADMIN_KEY", "")
+os.environ.setdefault("NEWS_ENABLED", "false")
+os.environ.setdefault("ALLOW_REGISTRATION", "true")
+# These tests mock Gemini calls, so select Gemini before importing server.
+os.environ["AI_PROVIDER"] = "gemini"
+
+import server
+
+
+class ConversationMonitorNormalizationTests(unittest.TestCase):
+    def test_normalizes_valid_gemini_json(self):
+        raw = json.dumps({
+            "risk_score": 86.6,
+            "summary": "Có dấu hiệu thúc ép chuyển tiền",
+            "evidence": ["Yêu cầu nạp tiền", "Hứa hoa hồng cao"],
+            "recommended_action": "Dừng giao dịch và xác minh",
+            "confidence": "HIGH",
+        }, ensure_ascii=False)
+        result = server.normalize_conversation_analysis(raw)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["risk_score"], 87)
+        self.assertEqual(result["risk_level"], "HIGH")
+        self.assertEqual(len(result["evidence"]), 2)
+
+    def test_clamps_score_and_bounds_evidence(self):
+        raw = json.dumps({
+            "risk_score": 180,
+            "summary": "x" * 900,
+            "evidence": ["a", "b", "c", "d", "e", "f"],
+            "confidence": "unknown",
+        })
+        result = server.normalize_conversation_analysis(raw)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["risk_score"], 100)
+        self.assertEqual(result["risk_level"], "HIGH")
+        self.assertEqual(len(result["evidence"]), 5)
+        self.assertEqual(result["confidence"], "LOW")
+        self.assertLessEqual(len(result["summary"]), 600)
+
+    def test_normalizes_and_bounds_conversation_memory(self):
+        result = server.normalize_conversation_analysis(json.dumps({
+            "risk_score": 44,
+            "conversation_memory": {
+                "summary": "x" * 1600,
+                "key_facts": [f"fact {index}" for index in range(12)],
+                "behavior_patterns": ["pattern"],
+                "open_questions": ["question"],
+            },
+        }))
+        self.assertEqual(len(result["conversation_memory"]["summary"]), 1200)
+        self.assertEqual(len(result["conversation_memory"]["key_facts"]), 8)
+        self.assertEqual(result["conversation_memory"]["behavior_patterns"], ["pattern"])
+
+    def test_rejects_invalid_or_missing_risk_score(self):
+        self.assertIsNone(server.normalize_conversation_analysis("not json"))
+        self.assertIsNone(server.normalize_conversation_analysis('{"risk_score":"high"}'))
+
+    def test_maps_scores_to_risk_levels(self):
+        low = server.normalize_conversation_analysis('{"risk_score": 20}')
+        medium = server.normalize_conversation_analysis('{"risk_score": 50}')
+        high = server.normalize_conversation_analysis('{"risk_score": 90}')
+        self.assertEqual(low["risk_level"], "LOW")
+        self.assertEqual(medium["risk_level"], "MEDIUM")
+        self.assertEqual(high["risk_level"], "HIGH")
+
+
+class ConversationMonitorApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        server.app.config.update(TESTING=True)
+        cls.client = server.app.test_client()
+
+    def setUp(self):
+        server._hits.clear()
+
+    def register(self):
+        email = f"monitor-{uuid.uuid4().hex[:8]}@example.test"
+        response = self.client.post(
+            "/api/register",
+            json={"email": email, "password": "test-password-123", "username": "Monitor"},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return {"Authorization": "Bearer " + response.get_json()["token"]}
+
+    def test_requires_authentication(self):
+        response = self.client.post(
+            "/api/monitor/conversation",
+            json={"messages": [{"sender": "A", "text": "Xin chào", "timestamp": 1000}]},
+        )
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_endpoint_calls_gemini_and_returns_bounded_result(self):
+        headers = self.register()
+        raw = json.dumps({
+            "risk_score": 82,
+            "summary": "Cuộc trò chuyện chuyển sang yêu cầu nạp tiền.",
+            "evidence": ["Yêu cầu nạp tiền trước", "Hứa hoa hồng cao"],
+            "recommended_action": "Dừng giao dịch và xác minh độc lập.",
+            "confidence": "HIGH",
+        }, ensure_ascii=False)
+        with patch.object(server, "GEMINI_API_KEY", "test-gemini-key"), \
+             patch.object(server, "gemini", return_value=raw) as gemini_call:
+            response = self.client.post(
+                "/api/monitor/conversation",
+                json={"messages": [
+                    {"sender": "Người lạ", "text": "Việc nhẹ lương cao", "timestamp": 1000},
+                    {"sender": "Người lạ", "text": "Nạp tiền để kích hoạt", "timestamp": 2000},
+                ]},
+                headers=headers,
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["risk_level"], "HIGH")
+        self.assertEqual(payload["risk_score"], 82)
+        self.assertEqual(payload["message_count"], 2)
+        self.assertEqual(payload["last_message_timestamp"], 2000)
+        self.assertTrue(payload["ai"])
+        gemini_call.assert_called_once()
+
+    def test_endpoint_receives_previous_memory_and_returns_updated_memory(self):
+        headers = self.register()
+        raw = json.dumps({
+            "risk_score": 75,
+            "summary": "Cuộc trò chuyện có chuyển biến đáng ngờ.",
+            "evidence": ["Sau khi tạo lòng tin, đối phương yêu cầu phí trước."],
+            "recommended_action": "Không chuyển tiền; xác minh qua kênh chính thức.",
+            "confidence": "HIGH",
+            "conversation_memory": {
+                "summary": "Ban đầu tạo lòng tin, sau đó yêu cầu khoản phí.",
+                "key_facts": ["Đối phương tự nhận hỗ trợ hồ sơ."],
+                "behavior_patterns": ["Chuyển từ thân thiện sang thúc ép."],
+                "open_questions": ["Chưa xác minh được danh tính."],
+            },
+        }, ensure_ascii=False)
+        previous = {
+            "summary": "Đối phương ban đầu trò chuyện thân thiện.",
+            "key_facts": ["Chưa yêu cầu tiền ở giai đoạn đầu."],
+            "behavior_patterns": ["Tạo lòng tin."],
+            "open_questions": [],
+        }
+        with patch.object(server, "GEMINI_API_KEY", "test-gemini-key"), \
+             patch.object(server, "gemini", return_value=raw) as gemini_call:
+            response = self.client.post(
+                "/api/monitor/conversation",
+                json={
+                    "memory": previous,
+                    "messages": [
+                        {"sender": "Người lạ", "text": "Mình sẽ hỗ trợ bạn.", "timestamp": 1000},
+                        {"sender": "Người lạ", "text": "Bạn cần đóng phí xác minh.", "timestamp": 2000},
+                    ],
+                },
+                headers=headers,
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        prompt = gemini_call.call_args.args[1]
+        self.assertIn("Đối phương ban đầu trò chuyện thân thiện", prompt)
+        self.assertEqual(
+            response.get_json()["conversation_memory"]["behavior_patterns"],
+            ["Chuyển từ thân thiện sang thúc ép."],
+        )
+
+    def test_endpoint_rejects_more_than_twelve_messages(self):
+        headers = self.register()
+        with patch.object(server, "GEMINI_API_KEY", "test-gemini-key"):
+            response = self.client.post(
+                "/api/monitor/conversation",
+                json={"messages": [
+                    {"sender": "A", "text": "Xin chào", "timestamp": i}
+                    for i in range(13)
+                ]},
+                headers=headers,
+            )
+        self.assertEqual(response.status_code, 400)
+
+    def test_endpoint_rejects_oversized_transcript(self):
+        headers = self.register()
+        with patch.object(server, "GEMINI_API_KEY", "test-gemini-key"):
+            response = self.client.post(
+                "/api/monitor/conversation",
+                json={"messages": [
+                    {"sender": "A", "text": "x" * 800, "timestamp": i}
+                    for i in range(8)
+                ]},
+                headers=headers,
+            )
+        self.assertEqual(response.status_code, 400)
+
+
+if __name__ == "__main__":
+    unittest.main()

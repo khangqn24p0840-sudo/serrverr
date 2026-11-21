@@ -1,0 +1,22 @@
+SCAMSHIELD - CHUYEN AI CHINH SANG GROQ
+
+1. Dung server dang chay bang Ctrl+C.
+2. Mo file .env trong thu muc server. Khong gui file nay cho nguoi khac.
+3. Trong Groq Console, vao API Keys va tao API key cua Groq.
+4. Dat cac dong sau trong .env (giu nguyen ADMIN_KEY, SECRET_KEY va cac cau hinh khac):
+
+AI_PROVIDER=groq
+GROQ_API_KEY=API_KEY_GROQ_CUA_BAN
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_VISION_MODEL=qwen/qwen3.8-27b
+GROQ_TIMEOUT_SECONDS=120
+
+Neu .env cu dang co AI_PROVIDER=xai va XAI_API_KEY, hay thay bang AI_PROVIDER=groq va GROQ_API_KEY. Khong dung API key xAI.
+
+5. Luu .env va chay lai .\chay.ps1.
+6. Mo http://127.0.0.1:8000/health; mong doi ai_provider=groq, ai_model=openai/gpt-oss-20b, ai=true.
+7. Gui thu mot tin nhan trong app. /health chi xac nhan cau hinh, khong xac nhan API key hoat dong.
+8. Khi gui anh, backend chon GROQ_VISION_MODEL. Model Qwen 3.8 27B dang duoc tai lieu Groq danh dau la preview; kiem tra kha nang truy cap va han muc tai Groq Console.
+
+Khong xoa thu muc data, database, secret.key hoac .venv cu.
+Khong can sua APK vi API Android va response JSON duoc giu nguyen.

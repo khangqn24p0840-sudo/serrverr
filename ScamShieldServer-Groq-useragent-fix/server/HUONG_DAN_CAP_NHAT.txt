@@ -1,0 +1,32 @@
+SCAMSHIELD SERVER - HUONG DAN CAP NHAT
+
+1. DUNG SERVER CU bang Ctrl+C trong cua so PowerShell dang chay.
+2. Nen sao luu thu muc data hien tai truoc khi cap nhat.
+3. Giai nen goi nay vao D:\ScamShield\server va cho phep ghi de cac file ma nguon.
+   Goi cap nhat khong chua thu muc data/ va khong chua .venv/, nen du lieu va moi truong Python hien co se khong bi ghi de.
+4. Mo D:\ScamShield\server\.env bang Notepad.
+5. Dien API key cua Groq va thay ADMIN_KEY bang khoa rieng (giu nguyen SECRET_KEY cu):
+      AI_PROVIDER=groq
+      GROQ_API_KEY=API_KEY_GROQ_CUA_BAN
+      GROQ_MODEL=openai/gpt-oss-20b
+      GROQ_VISION_MODEL=qwen/qwen3.8-27b
+      GROQ_TIMEOUT_SECONDS=120
+      ADMIN_KEY=CHUOI_KHOA_QUAN_TRI_RIENG
+   Neu file .env cu co XAI_API_KEY va AI_PROVIDER=xai, hay thay bang GROQ_API_KEY va AI_PROVIDER=groq. Khong gui cac khoa nay cho nguoi khac va khong dua file .env len GitHub.
+6. Chay PowerShell tai thu muc server:
+      .\chay.ps1
+7. Mo PowerShell cua so khac va kiem tra:
+      Invoke-RestMethod http://127.0.0.1:8000/health | Format-List
+
+Ket qua mong doi sau khi dien API key hop le:
+   ok          : True
+   ai          : True
+   ai_provider : groq
+   ai_model    : openai/gpt-oss-20b
+   media_ai    : True
+
+LUU Y:
+- Khong xoa thu muc data/. No chua database va secret.key cua ban.
+- Khong dung API key xAI/Grok cho Groq; hai nha cung cap khac nhau.
+- Neu muon dung OpenRouter Free, dat AI_PROVIDER=openrouter va dien OPENROUTER_API_KEY.
+- Launcher chay Waitress, khong con hien canh bao Flask development server.
