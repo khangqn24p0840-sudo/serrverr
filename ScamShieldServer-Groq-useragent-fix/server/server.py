@@ -336,6 +336,7 @@ def init_db():
           role TEXT NOT NULL DEFAULT 'member',
           joined_at INTEGER NOT NULL,
           last_read_message_id INTEGER NOT NULL DEFAULT 0,
+          joined_after_message_id INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY(chat_id, user_id));
         CREATE INDEX IF NOT EXISTS idx_family_members_user ON family_members(user_id, chat_id);
         CREATE TABLE IF NOT EXISTS family_invites(
@@ -369,6 +370,9 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN sess INTEGER NOT NULL DEFAULT 0")
     if "name" not in cols:  # tên hiển thị công khai (Cộng đồng)
         c.execute("ALTER TABLE users ADD COLUMN name TEXT")
+    family_member_cols = [r[1] for r in c.execute("PRAGMA table_info(family_members)")]
+    if "joined_after_message_id" not in family_member_cols:
+        c.execute("ALTER TABLE family_members ADD COLUMN joined_after_message_id INTEGER NOT NULL DEFAULT 0")
     ai_cols = [r[1] for r in c.execute("PRAGMA table_info(ai_activity)")]
     if "provider" not in ai_cols:
         c.execute("ALTER TABLE ai_activity ADD COLUMN provider TEXT")
@@ -999,7 +1003,8 @@ def family_chat_create():
     )
     chat_id = cur.lastrowid
     conn.execute(
-        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id) VALUES(?,?,'owner',?,0)",
+        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id,joined_after_message_id) "
+        "VALUES(?,?,'owner',?,0,0)",
         (chat_id, g.user["id"], now),
     )
     conn.commit()
@@ -1038,8 +1043,9 @@ def family_chat_join():
         (invite["chat_id"],),
     ).fetchone()[0]
     conn.execute(
-        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id) VALUES(?,?,'member',?,?)",
-        (invite["chat_id"], g.user["id"], now, latest),
+        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id,joined_after_message_id) "
+        "VALUES(?,?,'member',?,?,?)",
+        (invite["chat_id"], g.user["id"], now, latest, latest),
     )
     conn.execute("UPDATE family_invites SET use_count=use_count+1 WHERE id=?", (invite["id"],))
     conn.commit()
@@ -1200,13 +1206,16 @@ def family_chat_messages(chat_id):
         conn.commit()
 
     member_rows = conn.execute(
-        "SELECT user_id,last_read_message_id FROM family_members WHERE chat_id=?",
+        "SELECT user_id,last_read_message_id,joined_after_message_id FROM family_members WHERE chat_id=?",
         (chat_id,),
     ).fetchall()
     member_count = len(member_rows)
 
     def receipt_for(message_id, sender_id):
-        recipients = [m for m in member_rows if m["user_id"] != sender_id]
+        recipients = [
+            m for m in member_rows
+            if m["user_id"] != sender_id and m["joined_after_message_id"] < message_id
+        ]
         read_count = sum(1 for m in recipients if m["last_read_message_id"] >= message_id)
         return read_count, len(recipients)
 
