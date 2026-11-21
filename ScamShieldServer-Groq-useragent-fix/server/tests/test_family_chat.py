@@ -196,7 +196,7 @@ class FamilyChatApiTests(unittest.TestCase):
         member_list = self.client.get(
             f"/api/family/chats/{room_id}/members", headers=owner
         ).get_json()["members"]
-        member_id = next(m["id"] for m in member_list if m["name"] == "RoleMember")
+        member_id = next(m["id"] for m in member_list if m["role"] == "member")
         removed = self.client.delete(
             f"/api/family/chats/{room_id}/members/{member_id}", headers=admin
         )
