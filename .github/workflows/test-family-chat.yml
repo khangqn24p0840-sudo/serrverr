@@ -1,0 +1,29 @@
+name: Family Chat API tests
+
+on:
+  pull_request:
+    paths:
+      - "ScamShieldServer-Groq-useragent-fix/server/server.py"
+      - "ScamShieldServer-Groq-useragent-fix/server/tests/test_family_chat.py"
+      - ".github/workflows/test-family-chat.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ScamShieldServer-Groq-useragent-fix/server/server.py"
+      - "ScamShieldServer-Groq-useragent-fix/server/tests/test_family_chat.py"
+
+jobs:
+  family-chat:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ScamShieldServer-Groq-useragent-fix/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install server dependencies
+        run: pip install -r requirements.txt
+      - name: Run Family Chat API regression tests
+        run: python -m unittest discover -s tests -p "test_family_chat.py" -v
