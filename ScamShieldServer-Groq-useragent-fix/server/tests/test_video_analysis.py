@@ -37,9 +37,9 @@ class VideoAnalysisApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         return {"Authorization": "Bearer " + response.get_json()["token"]}
 
-    def payload(self, count=4, confidence="HIGH", probability=0.82):
+    def payload(self, count=4):
         # The endpoint validates the JPEG signature and size; AI itself is mocked below.
-        jpeg = b"\\xff\\xd8\\xff\\xe0" + b"test-frame-data"
+        jpeg = bytes.fromhex("ffd8ffe0") + b"test-frame-data"
         frames = []
         for index in range(count):
             frames.append({
