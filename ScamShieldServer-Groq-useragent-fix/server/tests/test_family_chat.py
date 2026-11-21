@@ -168,7 +168,7 @@ class FamilyChatApiTests(unittest.TestCase):
 
     def test_admin_permissions_and_member_removal(self):
         owner = self.register("RoleOwner")
-        admin = self.register("RoleAdmin")
+        admin = self.register("HelperOne")
         member = self.register("RoleMember")
         room_id = self.create_room(owner)
 
