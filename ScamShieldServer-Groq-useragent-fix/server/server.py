@@ -336,6 +336,7 @@ def init_db():
           role TEXT NOT NULL DEFAULT 'member',
           joined_at INTEGER NOT NULL,
           last_read_message_id INTEGER NOT NULL DEFAULT 0,
+          joined_after_message_id INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY(chat_id, user_id));
         CREATE INDEX IF NOT EXISTS idx_family_members_user ON family_members(user_id, chat_id);
         CREATE TABLE IF NOT EXISTS family_invites(
@@ -369,6 +370,9 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN sess INTEGER NOT NULL DEFAULT 0")
     if "name" not in cols:  # tên hiển thị công khai (Cộng đồng)
         c.execute("ALTER TABLE users ADD COLUMN name TEXT")
+    family_member_cols = [r[1] for r in c.execute("PRAGMA table_info(family_members)")]
+    if "joined_after_message_id" not in family_member_cols:
+        c.execute("ALTER TABLE family_members ADD COLUMN joined_after_message_id INTEGER NOT NULL DEFAULT 0")
     ai_cols = [r[1] for r in c.execute("PRAGMA table_info(ai_activity)")]
     if "provider" not in ai_cols:
         c.execute("ALTER TABLE ai_activity ADD COLUMN provider TEXT")
@@ -999,7 +1003,8 @@ def family_chat_create():
     )
     chat_id = cur.lastrowid
     conn.execute(
-        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id) VALUES(?,?,'owner',?,0)",
+        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id,joined_after_message_id) "
+        "VALUES(?,?,'owner',?,0,0)",
         (chat_id, g.user["id"], now),
     )
     conn.commit()
@@ -1038,8 +1043,9 @@ def family_chat_join():
         (invite["chat_id"],),
     ).fetchone()[0]
     conn.execute(
-        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id) VALUES(?,?,'member',?,?)",
-        (invite["chat_id"], g.user["id"], now, latest),
+        "INSERT INTO family_members(chat_id,user_id,role,joined_at,last_read_message_id,joined_after_message_id) "
+        "VALUES(?,?,'member',?,?,?)",
+        (invite["chat_id"], g.user["id"], now, latest, latest),
     )
     conn.execute("UPDATE family_invites SET use_count=use_count+1 WHERE id=?", (invite["id"],))
     conn.commit()
@@ -1049,11 +1055,19 @@ def family_chat_join():
 @app.post("/api/family/chats/<int:chat_id>/invite")
 @auth
 def family_chat_invite(chat_id):
-    family_require_member(chat_id)
+    member = family_require_member(chat_id)
+    if member["role"] not in ("owner", "admin"):
+        raise ApiError("Chỉ trưởng nhóm hoặc quản trị viên mới có thể tạo mã mời", 403)
     rate_limit(("family_invite", g.user["id"]), 10, 3600)
     now = int(time.time())
     conn = db()
-    # Only a digest is persisted; the one-time plaintext code is returned to the member.
+    # Mỗi nhóm chỉ có một mã mời còn hiệu lực. Mã mới sẽ thu hồi mã cũ.
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "UPDATE family_invites SET revoked=1 "
+        "WHERE chat_id=? AND revoked=0 AND expires_at>? AND use_count<max_uses",
+        (chat_id, now),
+    )
     for _ in range(5):
         code = secrets.token_hex(5).upper()
         digest = hashlib.sha256(code.encode("ascii")).hexdigest()
@@ -1068,7 +1082,25 @@ def family_chat_invite(chat_id):
                            max_uses=FAMILY_INVITE_MAX_USES)
         except sqlite3.IntegrityError:
             conn.rollback()
+            conn.execute("BEGIN IMMEDIATE")
+    conn.rollback()
     raise ApiError("Chưa tạo được mã mời, hãy thử lại", 503)
+
+
+@app.delete("/api/family/chats/<int:chat_id>/invites")
+@auth
+def family_chat_revoke_invites(chat_id):
+    member = family_require_member(chat_id)
+    if member["role"] not in ("owner", "admin"):
+        raise ApiError("Chỉ trưởng nhóm hoặc quản trị viên mới có thể thu hồi mã mời", 403)
+    now = int(time.time())
+    cur = db().execute(
+        "UPDATE family_invites SET revoked=1 "
+        "WHERE chat_id=? AND revoked=0 AND expires_at>? AND use_count<max_uses",
+        (chat_id, now),
+    )
+    db().commit()
+    return jsonify(ok=True, revoked_count=cur.rowcount)
 
 
 @app.get("/api/family/chats/<int:chat_id>/members")
@@ -1082,11 +1114,64 @@ def family_chat_members(chat_id):
         (chat_id,),
     ).fetchall()
     return jsonify(members=[
-        dict(id=r["user_id"],
+        dict(id=str(r["user_id"]),
              name=(r["name"] or "").strip() or (((r["email"] or "Thành viên").split("@")[0])[:3] + "***"),
              role=r["role"], joined_at=r["joined_at"], mine=(r["user_id"] == g.user["id"]))
         for r in rows
     ])
+
+
+@app.patch("/api/family/chats/<int:chat_id>/members/<int:user_id>")
+@auth
+def family_chat_member_role(chat_id, user_id):
+    actor = family_require_member(chat_id)
+    if actor["role"] != "owner":
+        raise ApiError("Chỉ trưởng nhóm mới có thể thay đổi quyền quản trị", 403)
+    if user_id == g.user["id"]:
+        raise ApiError("Không thể tự thay đổi quyền của trưởng nhóm", 400)
+    role = str(body().get("role", "")).strip().lower()
+    if role not in ("admin", "member"):
+        raise ApiError("Vai trò chỉ có thể là admin hoặc member", 400)
+    target = db().execute(
+        "SELECT role FROM family_members WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    ).fetchone()
+    if not target:
+        raise ApiError("Không tìm thấy thành viên", 404)
+    if target["role"] == "owner":
+        raise ApiError("Không thể thay đổi quyền của trưởng nhóm", 400)
+    db().execute(
+        "UPDATE family_members SET role=? WHERE chat_id=? AND user_id=?",
+        (role, chat_id, user_id),
+    )
+    db().commit()
+    return jsonify(ok=True, user_id=str(user_id), role=role)
+
+
+@app.delete("/api/family/chats/<int:chat_id>/members/<int:user_id>")
+@auth
+def family_chat_member_remove(chat_id, user_id):
+    actor = family_require_member(chat_id)
+    if actor["role"] not in ("owner", "admin"):
+        raise ApiError("Bạn không có quyền xóa thành viên", 403)
+    if user_id == g.user["id"]:
+        raise ApiError("Hãy dùng chức năng rời nhóm để xóa chính mình", 400)
+    target = db().execute(
+        "SELECT role FROM family_members WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    ).fetchone()
+    if not target:
+        raise ApiError("Không tìm thấy thành viên", 404)
+    if target["role"] == "owner":
+        raise ApiError("Không thể xóa trưởng nhóm", 403)
+    if actor["role"] == "admin" and target["role"] != "member":
+        raise ApiError("Quản trị viên chỉ có thể xóa thành viên thường", 403)
+    db().execute(
+        "DELETE FROM family_members WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    )
+    db().commit()
+    return jsonify(ok=True, user_id=str(user_id))
 
 
 @app.get("/api/family/chats/<int:chat_id>/messages")
@@ -1095,13 +1180,22 @@ def family_chat_messages(chat_id):
     family_require_member(chat_id)
     rate_limit(("family_read", g.user["id"]), 240)
     limit = min(max(request.args.get("limit", 50, type=int), 1), 100)
+    after_id = max(request.args.get("after_id", 0, type=int), 0)
     conn = db()
-    rows = conn.execute(
-        "SELECT id,sender_id,sender_name,body,created_at FROM family_messages "
-        "WHERE chat_id=? ORDER BY id DESC LIMIT ?",
-        (chat_id, limit),
-    ).fetchall()
-    rows = list(reversed(rows))
+    if after_id > 0:
+        rows = conn.execute(
+            "SELECT id,sender_id,sender_name,body,created_at FROM family_messages "
+            "WHERE chat_id=? AND id>? ORDER BY id ASC LIMIT ?",
+            (chat_id, after_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id,sender_id,sender_name,body,created_at FROM family_messages "
+            "WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        rows = list(reversed(rows))
+
     if rows:
         newest_id = rows[-1]["id"]
         conn.execute(
@@ -1110,11 +1204,46 @@ def family_chat_messages(chat_id):
             (newest_id, chat_id, g.user["id"]),
         )
         conn.commit()
-    return jsonify(messages=[
-        dict(id=str(r["id"]), sender_name=r["sender_name"], body=r["body"],
-             created_at=r["created_at"], mine=(r["sender_id"] == g.user["id"]))
-        for r in rows
-    ])
+
+    member_rows = conn.execute(
+        "SELECT user_id,last_read_message_id,joined_after_message_id FROM family_members WHERE chat_id=?",
+        (chat_id,),
+    ).fetchall()
+    member_count = len(member_rows)
+
+    def receipt_for(message_id, sender_id):
+        recipients = [
+            m for m in member_rows
+            if m["user_id"] != sender_id and m["joined_after_message_id"] < message_id
+        ]
+        read_count = sum(1 for m in recipients if m["last_read_message_id"] >= message_id)
+        return read_count, len(recipients)
+
+    message_payload = []
+    for r in rows:
+        read_count, recipient_count = receipt_for(r["id"], r["sender_id"])
+        message_payload.append(dict(
+            id=str(r["id"]), sender_name=r["sender_name"], body=r["body"],
+            created_at=r["created_at"], mine=(r["sender_id"] == g.user["id"]),
+            read_by_count=read_count, recipient_count=recipient_count,
+        ))
+
+    # Kèm biên nhận đọc của 50 tin gần nhất do chính người dùng gửi,
+    # kể cả khi đợt đồng bộ này không có tin nhắn mới.
+    own_rows = conn.execute(
+        "SELECT id,sender_id FROM family_messages "
+        "WHERE chat_id=? AND sender_id=? ORDER BY id DESC LIMIT 50",
+        (chat_id, g.user["id"]),
+    ).fetchall()
+    read_receipts = []
+    for r in own_rows:
+        read_count, recipient_count = receipt_for(r["id"], r["sender_id"])
+        read_receipts.append(dict(
+            id=str(r["id"]), read_by_count=read_count, recipient_count=recipient_count
+        ))
+
+    return jsonify(messages=message_payload, read_receipts=read_receipts,
+                   member_count=member_count, after_id=after_id)
 
 
 @app.post("/api/family/chats/<int:chat_id>/messages")

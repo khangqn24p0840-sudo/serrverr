@@ -148,5 +148,161 @@ class FamilyChatApiTests(unittest.TestCase):
         )
 
 
+    def test_invite_rotation_invalidates_previous_code(self):
+        owner = self.register("InviteOwner")
+        first_member = self.register("FirstJoin")
+        second_member = self.register("SecondJoin")
+        room_id = self.create_room(owner)
+        old_code = self.create_invite(owner, room_id)
+        new_code = self.create_invite(owner, room_id)
+
+        old_join = self.client.post(
+            "/api/family/chats/join", json={"invite_code": old_code}, headers=first_member
+        )
+        self.assertEqual(old_join.status_code, 404)
+
+        new_join = self.client.post(
+            "/api/family/chats/join", json={"invite_code": new_code}, headers=second_member
+        )
+        self.assertEqual(new_join.status_code, 200)
+
+    def test_admin_permissions_and_member_removal(self):
+        owner = self.register("RoleOwner")
+        admin = self.register("HelperOne")
+        member = self.register("RoleMember")
+        room_id = self.create_room(owner)
+
+        code = self.create_invite(owner, room_id)
+        for headers in (admin, member):
+            joined = self.client.post(
+                "/api/family/chats/join", json={"invite_code": code}, headers=headers
+            )
+            self.assertEqual(joined.status_code, 200)
+
+        admin_id = self.client.get(
+            f"/api/family/chats/{room_id}/members", headers=admin
+        ).get_json()["members"][1]["id"]
+        role_change = self.client.patch(
+            f"/api/family/chats/{room_id}/members/{admin_id}",
+            json={"role": "admin"}, headers=owner,
+        )
+        self.assertEqual(role_change.status_code, 200)
+
+        created_by_admin = self.client.post(
+            f"/api/family/chats/{room_id}/invite", headers=admin
+        )
+        self.assertEqual(created_by_admin.status_code, 200)
+
+        member_list = self.client.get(
+            f"/api/family/chats/{room_id}/members", headers=owner
+        ).get_json()["members"]
+        member_id = next(m["id"] for m in member_list if m["role"] == "member")
+        removed = self.client.delete(
+            f"/api/family/chats/{room_id}/members/{member_id}", headers=admin
+        )
+        self.assertEqual(removed.status_code, 200)
+        denied_after_remove = self.client.get(
+            f"/api/family/chats/{room_id}/messages", headers=member
+        )
+        self.assertEqual(denied_after_remove.status_code, 404)
+
+        admin_cannot_promote = self.client.patch(
+            f"/api/family/chats/{room_id}/members/{member_id}",
+            json={"role": "admin"}, headers=admin,
+        )
+        self.assertEqual(admin_cannot_promote.status_code, 403)
+
+    def test_invite_permissions_and_revocation(self):
+        owner = self.register("InvitePermissionOwner")
+        member = self.register("InvitePermissionMember")
+        outsider = self.register("InvitePermissionOutsider")
+        room_id = self.create_room(owner)
+        code = self.create_invite(owner, room_id)
+        joined = self.client.post(
+            "/api/family/chats/join", json={"invite_code": code}, headers=member
+        )
+        self.assertEqual(joined.status_code, 200)
+
+        denied = self.client.post(f"/api/family/chats/{room_id}/invite", headers=member)
+        self.assertEqual(denied.status_code, 403)
+
+        revoked = self.client.delete(f"/api/family/chats/{room_id}/invites", headers=owner)
+        self.assertEqual(revoked.status_code, 200)
+        after_revoke = self.client.post(
+            "/api/family/chats/join", json={"invite_code": code}, headers=outsider
+        )
+        self.assertEqual(after_revoke.status_code, 404)
+
+    def test_incremental_messages_and_read_receipts(self):
+        owner = self.register("ReceiptOwner")
+        member = self.register("ReceiptMember")
+        room_id = self.create_room(owner)
+        code = self.create_invite(owner, room_id)
+        self.client.post("/api/family/chats/join", json={"invite_code": code}, headers=member)
+
+        first = self.client.post(
+            f"/api/family/chats/{room_id}/messages",
+            json={"body": "Tin đầu tiên"}, headers=owner,
+        )
+        self.assertEqual(first.status_code, 201)
+        first_id = int(first.get_json()["message"]["id"])
+
+        member_initial = self.client.get(
+            f"/api/family/chats/{room_id}/messages?limit=50&after_id=0", headers=member
+        ).get_json()
+        self.assertEqual(len(member_initial["messages"]), 1)
+
+        owner_poll = self.client.get(
+            f"/api/family/chats/{room_id}/messages?limit=50&after_id={first_id}", headers=owner
+        ).get_json()
+        receipt = next(x for x in owner_poll["read_receipts"] if int(x["id"]) == first_id)
+        self.assertEqual(receipt["read_by_count"], 1)
+        self.assertEqual(receipt["recipient_count"], 1)
+
+        second = self.client.post(
+            f"/api/family/chats/{room_id}/messages",
+            json={"body": "Tin thứ hai"}, headers=member,
+        )
+        self.assertEqual(second.status_code, 201)
+        second_id = int(second.get_json()["message"]["id"])
+        incremental = self.client.get(
+            f"/api/family/chats/{room_id}/messages?after_id={first_id}", headers=owner
+        ).get_json()
+        self.assertEqual([m["body"] for m in incremental["messages"]], ["Tin thứ hai"])
+        self.assertEqual(int(incremental["messages"][0]["id"]), second_id)
+
+
+    def test_members_joining_later_are_not_counted_as_readers_of_old_messages(self):
+        owner = self.register("HistoricalOwner")
+        early_member = self.register("EarlyMember")
+        late_member = self.register("LateMember")
+        room_id = self.create_room(owner)
+
+        first_code = self.create_invite(owner, room_id)
+        self.client.post(
+            "/api/family/chats/join", json={"invite_code": first_code}, headers=early_member
+        )
+        sent = self.client.post(
+            f"/api/family/chats/{room_id}/messages",
+            json={"body": "Tin trước khi thành viên mới tham gia"}, headers=owner,
+        )
+        message_id = int(sent.get_json()["message"]["id"])
+
+        self.client.get(
+            f"/api/family/chats/{room_id}/messages", headers=early_member
+        )
+        second_code = self.create_invite(owner, room_id)
+        self.client.post(
+            "/api/family/chats/join", json={"invite_code": second_code}, headers=late_member
+        )
+
+        receipt_payload = self.client.get(
+            f"/api/family/chats/{room_id}/messages?after_id={message_id}", headers=owner
+        ).get_json()
+        receipt = next(x for x in receipt_payload["read_receipts"] if int(x["id"]) == message_id)
+        self.assertEqual(receipt["read_by_count"], 1)
+        self.assertEqual(receipt["recipient_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
