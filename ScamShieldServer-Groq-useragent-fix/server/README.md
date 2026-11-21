@@ -65,6 +65,17 @@ Có thể upload trực tiếp qua API quản trị:
 
 Chỉ dùng HTTPS khi kết nối từ điện thoại. Nếu chỉ chạy `python server.py` trên máy tính để thử, dùng Cloudflare Tunnel hoặc hạ tầng HTTPS tương đương.
 
+## 3c. Sàng lọc video deepfake
+
+Trong mục **Video Deepfake** của app, người dùng có thể chọn video dài 1–30 giây. Android trích tối đa 8 khung hình đại diện theo thứ tự thời gian, giảm kích thước/nén ảnh rồi gửi các khung hình đó tới `POST /api/analyze/video`. Server yêu cầu đăng nhập, giới hạn số khung hình và dung lượng, rồi dùng model Vision đã cấu hình để so sánh các dấu hiệu giữa các khung.
+
+- Server không lưu video hoặc các khung hình; nhật ký chỉ ghi thời lượng, số khung và dung lượng.
+- Không gửi âm thanh hoặc toàn bộ tệp video. Vì vậy đây chưa phải phân tích âm thanh/hình ảnh đồng bộ hoặc mô hình deepfake chuyên dụng theo từng frame.
+- Kết quả có các mức nghi giả, đáng ngờ, chưa thấy dấu hiệu rõ hoặc **chưa xác minh**. Độ tin cậy thấp / AI lỗi không được chuyển thành kết luận an toàn.
+- Kết quả chỉ là sàng lọc tham khảo; không xác minh danh tính người xuất hiện và không bảo đảm phát hiện mọi video giả mạo.
+
+Đối với video call trực tiếp, app vẫn quan sát màn hình theo quyền chia sẻ màn hình của Android. Khi chưa có mô hình phân loại deepfake chuyên dụng hoạt động, trạng thái bình thường sau thời gian quan sát được hiển thị là **chưa xác minh**, không phải an toàn.
+
 ## 4. Cấu hình AI và Theo dõi chat
 
 Máy chủ dùng Groq làm nhà cung cấp AI chính. Cấu hình API key và model trong file `.env` riêng trên máy chủ; không đưa khóa thật lên GitHub:
