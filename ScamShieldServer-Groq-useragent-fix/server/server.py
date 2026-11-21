@@ -2636,6 +2636,20 @@ MEDIA_SYSTEM = (
 )
 
 
+VIDEO_SYSTEM = (
+    "Bạn là bộ hỗ trợ sàng lọc video có dấu hiệu deepfake. Bạn sẽ nhận các khung hình JPEG "
+    "được trích từ MỘT video ngắn theo đúng thứ tự thời gian, kèm mốc thời gian. "
+    "Đối chiếu sự nhất quán giữa các khung: đường viền mặt, vùng mắt-miệng, tóc/da/răng, "
+    "ánh sáng và bóng đổ, chi tiết bị biến dạng hoặc thay đổi bất thường theo thời gian. "
+    "Phân biệt dấu hiệu thực sự quan sát được với giới hạn do nén video, độ phân giải thấp, "
+    "che khuất hoặc thiếu khung hình. Không suy luận video là thật chỉ vì không thấy lỗi rõ ràng. "
+    "Nếu khuôn mặt nhỏ, bị che, không xuất hiện ổn định hoặc dữ liệu không đủ, phải đặt confidence=LOW. "
+    "Không nhận diện danh tính người trong video. Không khẳng định chắc chắn video thật/giả. "
+    'Chỉ trả JSON: {"fake_probability": số từ 0 đến 1, "confidence": "LOW" hoặc "MEDIUM" hoặc "HIGH", '
+    '"note": "một câu tiếng Việt nêu dấu hiệu quan sát được và giới hạn chính"}.'
+)
+
+
 
 
 # ----------------------------------------------------------------- VietQR bank verification
@@ -2788,6 +2802,128 @@ def analyze_media():
     verdict = "likely_fake" if score >= 0.65 else "uncertain" if score >= 0.35 else "likely_real"
     note = " ".join(notes) or "Chưa thấy dấu hiệu bất thường. Kết quả chỉ mang tính tham khảo."
     return jsonify(verdict=verdict, score=score, note=note)  # score: 0..1 (app tự nhân 100 để hiện %)
+
+@app.post("/api/analyze/video")
+@auth
+def analyze_video():
+    """Analyze a short video by comparing a bounded set of sampled frames; never certifies authenticity."""
+    rate_limit(("av", g.user["id"]), 8)
+    if request.content_length is not None and request.content_length > 8 * 1024 * 1024:
+        raise ApiError("Dữ liệu video vượt giới hạn 8MB", 413)
+    d = body()
+    try:
+        duration_ms = int(d.get("duration_ms", 0))
+    except (TypeError, ValueError):
+        raise ApiError("Thời lượng video không hợp lệ")
+    if duration_ms < 1000 or duration_ms > 30_000:
+        raise ApiError("Chỉ hỗ trợ video dài từ 1 đến 30 giây")
+    supplied = d.get("frames")
+    if not isinstance(supplied, list) or not 3 <= len(supplied) <= 8:
+        raise ApiError("Video cần có từ 3 đến 8 khung hình đại diện")
+    
+    content = []
+    timestamps = []
+    total_bytes = 0
+    previous_timestamp = -1
+    for index, item in enumerate(supplied):
+        if not isinstance(item, dict):
+            raise ApiError("Dữ liệu khung hình không hợp lệ")
+        try:
+            timestamp_ms = int(item.get("timestamp_ms", -1))
+        except (TypeError, ValueError):
+            raise ApiError("Mốc thời gian khung hình không hợp lệ")
+        if timestamp_ms < 0 or timestamp_ms >= duration_ms or timestamp_ms <= previous_timestamp:
+            raise ApiError("Các khung hình phải theo thứ tự thời gian của video")
+        previous_timestamp = timestamp_ms
+        mime = str(item.get("mime", "image/jpeg")).lower()
+        if mime != "image/jpeg":
+            raise ApiError("Khung hình video phải ở định dạng JPEG")
+        encoded = str(item.get("data", ""))
+        if not encoded or len(encoded) > 1_100_000:
+            raise ApiError("Một khung hình bị thiếu hoặc vượt dung lượng cho phép")
+        try:
+            frame = base64.b64decode(encoded, validate=True)
+        except Exception:
+            raise ApiError("Không đọc được dữ liệu khung hình")
+        if len(frame) < 4 or len(frame) > 800 * 1024 or not frame.startswith(b"\\xff\\xd8\\xff"):
+            raise ApiError("Khung hình JPEG không hợp lệ")
+        total_bytes += len(frame)
+        if total_bytes > 5 * 1024 * 1024:
+            raise ApiError("Tổng dung lượng khung hình vượt giới hạn 5MB", 413)
+        timestamps.append(timestamp_ms)
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.b64encode(frame).decode("ascii"),
+            },
+        })
+    sequence = ", ".join(f"{index + 1}: {stamp}ms" for index, stamp in enumerate(timestamps))
+    content.append({
+        "type": "text",
+        "text": (
+            f"Phân tích các khung hình theo thứ tự thời gian của video dài {duration_ms}ms. "
+            f"Mốc thời gian: {sequence}. Đánh giá tính nhất quán giữa các khung và nêu rõ "
+            "nếu không đủ dữ liệu để đưa ra đánh giá đáng tin cậy."
+        ),
+    })
+
+    started = time.perf_counter()
+    raw_ai = ai_generate(VIDEO_SYSTEM, content, max_tokens=450)
+    ai = parse_json(raw_ai)
+    confidence = str(ai.get("confidence", "LOW")).upper() if isinstance(ai, dict) else "LOW"
+    if confidence not in ("LOW", "MEDIUM", "HIGH"):
+        confidence = "LOW"
+    ai_ok = (
+        isinstance(ai, dict)
+        and isinstance(ai.get("fake_probability"), (int, float))
+        and not isinstance(ai.get("fake_probability"), bool)
+    )
+    failure_reason = None
+    if not ai_ok:
+        failure_reason = gemini_failure_reason() or (
+            "Nhà cung cấp AI trả kết quả video không đúng định dạng." if raw_ai
+            else "Nhà cung cấp AI không phân tích được các khung hình video."
+        )
+    record_ai_status(
+        "chat", "success" if ai_ok else "failure", started,
+        f"Kiểm tra video ({duration_ms}ms, {len(timestamps)} khung, {total_bytes} byte). Không lưu video hoặc khung hình.",
+        failure_reason, gemini_failure_code(),
+    )
+    if not ai_ok:
+        return jsonify(
+            ai=False, verdict="unverified", confidence="LOW",
+            frames_analyzed=len(timestamps),
+            note="AI hiện không phân tích được video. Không xem đây là kết quả an toàn.",
+        ), 503
+
+    probability = max(0.0, min(1.0, float(ai["fake_probability"])))
+    if confidence == "LOW":
+        verdict = "unverified"
+    elif probability >= 0.65:
+        verdict = "likely_fake"
+    elif probability >= 0.35:
+        verdict = "suspicious"
+    else:
+        verdict = "no_obvious_signs"
+    note = str(ai.get("note", "")).strip()[:300]
+    if not note:
+        note = "Chưa có nhận xét đủ rõ từ mô hình; cần xác minh qua kênh khác."
+        verdict = "unverified"
+        confidence = "LOW"
+    return jsonify(
+        ai=True,
+        verdict=verdict,
+        fake_probability=round(probability, 3),
+        fake_score=round(probability * 100),
+        confidence=confidence,
+        frames_analyzed=len(timestamps),
+        duration_ms=duration_ms,
+        note=note,
+        limitation="Đánh giá từ các khung hình tĩnh được lấy mẫu; không phân tích âm thanh và không xác nhận danh tính.",
+    )
+
 
 
 start_news_worker()
