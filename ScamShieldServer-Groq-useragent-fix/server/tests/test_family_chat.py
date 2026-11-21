@@ -272,5 +272,37 @@ class FamilyChatApiTests(unittest.TestCase):
         self.assertEqual(int(incremental["messages"][0]["id"]), second_id)
 
 
+    def test_members_joining_later_are_not_counted_as_readers_of_old_messages(self):
+        owner = self.register("HistoricalOwner")
+        early_member = self.register("EarlyMember")
+        late_member = self.register("LateMember")
+        room_id = self.create_room(owner)
+
+        first_code = self.create_invite(owner, room_id)
+        self.client.post(
+            "/api/family/chats/join", json={"invite_code": first_code}, headers=early_member
+        )
+        sent = self.client.post(
+            f"/api/family/chats/{room_id}/messages",
+            json={"body": "Tin trước khi thành viên mới tham gia"}, headers=owner,
+        )
+        message_id = int(sent.get_json()["message"]["id"])
+
+        self.client.get(
+            f"/api/family/chats/{room_id}/messages", headers=early_member
+        )
+        second_code = self.create_invite(owner, room_id)
+        self.client.post(
+            "/api/family/chats/join", json={"invite_code": second_code}, headers=late_member
+        )
+
+        receipt_payload = self.client.get(
+            f"/api/family/chats/{room_id}/messages?after_id={message_id}", headers=owner
+        ).get_json()
+        receipt = next(x for x in receipt_payload["read_receipts"] if int(x["id"]) == message_id)
+        self.assertEqual(receipt["read_by_count"], 1)
+        self.assertEqual(receipt["recipient_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
